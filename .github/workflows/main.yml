@@ -16,26 +16,49 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: emsp_db
+          MYSQL_USER: testuser      # 添加非root用户
+          MYSQL_PASSWORD: testpass  # 用户密码
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+        options: >-
+          --health-cmd="mysqladmin ping -u root -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
     - uses: actions/checkout@v3
+    
     - name: Set up JDK 1.8
       uses: actions/setup-java@v3
       with:
         java-version: '8'
-        distribution: 'adopt'
+        distribution: 'temurin'
         cache: maven
+    
+    # 添加MySQL就绪等待
+    - name: Wait for MySQL
+      run: |
+        for i in {1..10}; do
+          if mysqladmin ping -h 127.0.0.1 -u root -proot --silent; then
+            echo "MySQL is ready!"
+            break
+          else
+            echo "Waiting for MySQL ($i/10)"
+            sleep 5
+          fi
+        done
+    
     - name: Build with Maven
       run: mvn clean package -DskipTests
+      
     - name: Run tests
       run: mvn test
       env:
-        DB_HOST: localhost
-        DB_USER: root
-        DB_PASSWORD: root
-        DB_NAME: emsp_db
+        SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/emsp_db?useSSL=false&allowPublicKeyRetrieval=true
+        SPRING_DATASOURCE_USERNAME: root
+        SPRING_DATASOURCE_PASSWORD: root
+        SPRING_JPA_HIBERNATE_DDL_AUTO: update
+    
     - name: Build Docker image
       run: docker build -t emsp-account-card-service:${{ github.sha }} .
