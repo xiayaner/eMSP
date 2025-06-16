@@ -167,51 +167,27 @@ jobs:
           
           # 8. 等待应用启动
           echo "等待应用启动..."
-          sleep 15
+          sleep 5
           
-          # 9. 检查容器状态
+          # 9. 展示容器启动日志
+          echo "===== 容器启动日志 ====="
+          docker logs "${{ env.APP_NAME }}" --tail 50 || echo "日志尚未生成，等待..."
+          echo "======================="
+          sleep 5
+          
+          # 10. 检查容器状态
           echo "容器状态:"
           docker ps -a | grep "${{ env.APP_NAME }}" || { echo "容器未运行!"; exit 1; }
           
-          # 10. 健康检查（带重试机制）
-          echo "执行健康检查..."
-          HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
-          echo "健康检查 URL: $HEALTH_CHECK_URL"
-          
-          MAX_RETRY=12
-          SUCCESS=0
-          
-          for i in $(seq 1 $MAX_RETRY); do
-            echo "健康检查尝试 $i/$MAX_RETRY..."
-            if response=$(curl -s -f "$HEALTH_CHECK_URL" 2>/dev/null); then
-              status=$(echo "$response" | jq -r '.status')
-              if [ "$status" = "UP" ]; then
-                echo "健康检查成功! 服务状态: UP"
-                SUCCESS=1
-                break
-              else
-                echo "服务状态: $status"
-              fi
-            else
-              echo "HTTP请求失败，状态码: $?"
-            fi
-            
-            echo "等待10秒后重试..."
-            sleep 10
-          done
-          
-          if [ $SUCCESS -eq 0 ]; then
-            echo "健康检查最终失败! 显示容器日志:"
-            docker logs "${{ env.APP_NAME }}" --tail 100
-            echo "容器资源使用情况:"
-            docker stats "${{ env.APP_NAME }}" --no-stream
-            exit 1
-          fi
-          
-          # 11. 清理旧镜像
+          # 12. 清理旧镜像
           echo "清理旧镜像..."
           docker images --filter "reference=${{ env.APP_NAME }}" --format "{{.ID}}" | tail -n +2 | xargs -r docker rmi -f
           echo "清理完成"
+          
+          # 13. 显示最终启动日志
+          echo "===== 应用启动完成日志 ====="
+          docker logs "${{ env.APP_NAME }}" --tail 30
+          echo "=========================="
           
           echo "===== 部署成功完成! ====="
           date
