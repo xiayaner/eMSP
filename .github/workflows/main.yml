@@ -25,10 +25,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4  # 更新到最新版本
+      uses: actions/checkout@v4
 
     - name: Set up JDK 8
-      uses: actions/setup-java@v4  # 更新到最新版本
+      uses: actions/setup-java@v4
       with:
         java-version: '8'
         distribution: 'adopt'
@@ -50,11 +50,11 @@ jobs:
         docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
         
     - name: Upload Docker image
-      uses: actions/upload-artifact@v4  # 修复：更新到 v4
+      uses: actions/upload-artifact@v4
       with:
         name: docker-image
         path: ${{ env.APP_NAME }}.tar
-        retention-days: 1  # 设置较短的保留期以节省空间
+        retention-days: 1
 
   deploy-to-aliyun:
     needs: build-and-test
@@ -63,88 +63,82 @@ jobs:
 
     steps:
     - name: Download Docker image
-      uses: actions/download-artifact@v4  # 修复：更新到 v4
+      uses: actions/download-artifact@v4
       with:
         name: docker-image
         path: .
 
-    - name: Deploy to Aliyun ECS
-      uses: appleboy/ssh-action@v1.0.7  # 更新到最新版本
-      with:
-        host: ${{ env.SSH_HOST }}
-        username: ${{ env.SSH_USER }}
-        key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
-        port: ${{ env.SSH_PORT }}
-        script: |
-          #!/bin/bash
-          set -e  # 任何命令失败则退出
-          
-          echo "===== 开始部署到阿里云 ECS ====="
-          
-          # 1. 上传 Docker 镜像
-          echo "上传 Docker 镜像..."
-          scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp
-          
-          # 2. 加载 Docker 镜像
-          echo "加载 Docker 镜像..."
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "docker load -i /tmp/${{ env.APP_NAME }}.tar"
-          
-          # 3. 停止并删除旧容器（如果存在）
-          echo "停止并删除旧容器..."
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "docker stop ${{ env.APP_NAME }} || echo '没有运行中的容器'; \
-             docker rm ${{ env.APP_NAME }} || echo '没有可删除的容器'"
-          
-          # 4. 运行新容器（连接到阿里云 RDS）
-          echo "启动新容器..."
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "docker run -d \
-              --name ${{ env.APP_NAME }} \
-              -p ${{ env.APP_PORT }}:8080 \
-              -e SPRING_PROFILES_ACTIVE=prod \
-              -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
-              -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
-              -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
-              --restart=always \
-              ${{ env.APP_NAME }}:$GITHUB_SHA"
-          
-          # 5. 清理临时文件
-          echo "清理临时文件..."
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "rm /tmp/${{ env.APP_NAME }}.tar"
-          
-          # 6. 等待应用启动
-          echo "等待应用启动..."
-          sleep 30
-          
-          # 7. 检查容器状态
-          echo "容器状态:"
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "docker ps -a | grep ${{ env.APP_NAME }}"
-          
-          # 8. 健康检查
-          echo "执行健康检查..."
-          HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
-          echo "健康检查 URL: $HEALTH_CHECK_URL"
-          
-          response=$(ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "curl -s -o /dev/null -w '%{http_code}' $HEALTH_CHECK_URL")
-          
-          if [ "$response" -eq 200 ]; then
-            echo "健康检查成功! 服务状态正常."
-          else
-            echo "健康检查失败! HTTP 状态码: $response"
-            # 显示容器日志以便排查问题
-            ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-              "docker logs ${{ env.APP_NAME }} --tail 50"
-            exit 1
-          fi
-          
-          # 9. 发送部署通知
-          echo "===== 部署成功完成! ====="
-          
-          # 10. 清理旧镜像
-          echo "清理旧镜像..."
-          ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} \
-            "docker image prune -af"
+    # 使用官方 SSH 连接方式而不是第三方 Action
+    - name: Setup SSH environment
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.ALIYUN_ECS_SSH_KEY }}" > ~/.ssh/aliyun_key
+        chmod 600 ~/.ssh/aliyun_key
+        ssh-keyscan -p ${{ env.SSH_PORT }} ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Upload Docker image to ECS
+      run: |
+        scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp
+
+    - name: Deploy on Aliyun ECS
+      run: |
+        ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} -i ~/.ssh/aliyun_key ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << 'EOF'
+        #!/bin/bash
+        set -e  # 任何命令失败则退出
+        
+        echo "===== 开始部署到阿里云 ECS ====="
+        
+        # 1. 加载 Docker 镜像
+        echo "加载 Docker 镜像..."
+        docker load -i /tmp/${{ env.APP_NAME }}.tar
+        
+        # 2. 停止并删除旧容器（如果存在）
+        echo "停止并删除旧容器..."
+        docker stop ${{ env.APP_NAME }} || echo "没有运行中的容器"
+        docker rm ${{ env.APP_NAME }} || echo "没有可删除的容器"
+        
+        # 3. 运行新容器（连接到阿里云 RDS）
+        echo "启动新容器..."
+        docker run -d \
+          --name ${{ env.APP_NAME }} \
+          -p ${{ env.APP_PORT }}:8080 \
+          -e SPRING_PROFILES_ACTIVE=prod \
+          -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
+          -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
+          -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
+          --restart=always \
+          ${{ env.APP_NAME }}:$GITHUB_SHA
+        
+        # 4. 清理临时文件
+        echo "清理临时文件..."
+        rm /tmp/${{ env.APP_NAME }}.tar
+        
+        # 5. 等待应用启动
+        echo "等待应用启动..."
+        sleep 30
+        
+        # 6. 检查容器状态
+        echo "容器状态:"
+        docker ps -a | grep ${{ env.APP_NAME }}
+        
+        # 7. 健康检查
+        echo "执行健康检查..."
+        HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
+        echo "健康检查 URL: $HEALTH_CHECK_URL"
+        
+        response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL)
+        if [ "$response" -eq 200 ]; then
+          echo "健康检查成功! 服务状态正常."
+        else
+          echo "健康检查失败! HTTP 状态码: $response"
+          # 显示容器日志以便排查问题
+          docker logs ${{ env.APP_NAME }} --tail 50
+          exit 1
+        fi
+        
+        echo "===== 部署成功完成! ====="
+        
+        # 8. 清理旧镜像
+        echo "清理旧镜像..."
+        docker image prune -af
+        EOF
