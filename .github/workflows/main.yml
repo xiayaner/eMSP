@@ -44,8 +44,10 @@ jobs:
 
     - name: Build Docker image
       run: |
-        docker build -t $APP_NAME:$GITHUB_SHA .
-        docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
+        # 使用简单标签避免特殊字符问题
+        TAG=$(echo $GITHUB_SHA | cut -c1-12)
+        docker build -t $APP_NAME:$TAG .
+        docker save -o $APP_NAME.tar $APP_NAME:$TAG
         echo "Docker镜像大小: $(du -h $APP_NAME.tar)"
         
     - name: Upload Docker image
@@ -79,19 +81,13 @@ jobs:
 
     - name: Prepare SSH environment
       run: |
-        # 安装sshpass工具用于密码登录
         sudo apt-get update
         sudo apt-get install -y sshpass
-        
-        # 测试SSH连接
         sshpass -p "${{ secrets.ALIYUN_ECS_PASSWORD }}" ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} "echo 'SSH连接成功!'"
 
     - name: Upload Docker image to ECS
       run: |
-        # 使用sshpass进行文件传输
         sshpass -p "${{ secrets.ALIYUN_ECS_PASSWORD }}" scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ./${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp/
-        
-        # 验证文件已上传
         sshpass -p "${{ secrets.ALIYUN_ECS_PASSWORD }}" ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} "ls -lh /tmp/${{ env.APP_NAME }}.tar && echo '文件上传成功'"
 
     - name: Deploy to Aliyun ECS
@@ -133,42 +129,51 @@ jobs:
           
           # 3. 检查镜像是否加载成功
           echo "已加载的 Docker 镜像:"
-          docker images | grep ${{ env.APP_NAME }}
+          docker images | grep "${{ env.APP_NAME }}"
           
-          # 4. 停止并删除旧容器（如果存在）
+          # 4. 获取镜像ID
+          IMAGE_ID=$(docker images --filter "reference=${{ env.APP_NAME }}" --format "{{.ID}}" | head -n1)
+          echo "将使用的镜像ID: $IMAGE_ID"
+          
+          if [ -z "$IMAGE_ID" ]; then
+            echo "错误: 无法获取镜像ID!"
+            exit 1
+          fi
+          
+          # 5. 停止并删除旧容器（如果存在）
           echo "停止并删除旧容器..."
-          if docker ps -a | grep -q ${{ env.APP_NAME }}; then
-            docker stop ${{ env.APP_NAME }} || true
-            docker rm ${{ env.APP_NAME }} || true
+          if docker ps -a | grep -q "${{ env.APP_NAME }}"; then
+            docker stop "${{ env.APP_NAME }}" || true
+            docker rm "${{ env.APP_NAME }}" || true
           else
             echo "没有找到正在运行的旧容器"
           fi
           
-          # 5. 运行新容器
+          # 6. 运行新容器（使用镜像ID而不是标签）
           echo "启动新容器..."
           docker run -d \
-            --name ${{ env.APP_NAME }} \
-            -p ${{ env.APP_PORT }}:8080 \
+            --name "${{ env.APP_NAME }}" \
+            -p "${{ env.APP_PORT }}:8080" \
             -e SPRING_DATASOURCE_URL="jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}?useSSL=false&characterEncoding=utf8" \
-            -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
+            -e SPRING_DATASOURCE_USERNAME="${{ env.DB_USER }}" \
             -e SPRING_DATASOURCE_PASSWORD="${{ env.DB_PASSWORD }}" \
             --restart=always \
-            ${{ env.APP_NAME }}:$GITHUB_SHA
+            "$IMAGE_ID"
           
-          # 6. 清理临时文件
+          # 7. 清理临时文件
           echo "清理临时文件..."
-          rm -f $FILE_PATH
+          rm -f "$FILE_PATH"
           echo "临时文件已清理"
           
-          # 7. 等待应用启动
+          # 8. 等待应用启动
           echo "等待应用启动..."
           sleep 15
           
-          # 8. 检查容器状态
+          # 9. 检查容器状态
           echo "容器状态:"
-          docker ps -a | grep ${{ env.APP_NAME }} || { echo "容器未运行!"; exit 1; }
+          docker ps -a | grep "${{ env.APP_NAME }}" || { echo "容器未运行!"; exit 1; }
           
-          # 9. 健康检查（带重试机制）
+          # 10. 健康检查（带重试机制）
           echo "执行健康检查..."
           HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
           echo "健康检查 URL: $HEALTH_CHECK_URL"
@@ -178,7 +183,7 @@ jobs:
           
           for i in $(seq 1 $MAX_RETRY); do
             echo "健康检查尝试 $i/$MAX_RETRY..."
-            if response=$(curl -s -f $HEALTH_CHECK_URL); then
+            if response=$(curl -s -f "$HEALTH_CHECK_URL" 2>/dev/null); then
               status=$(echo "$response" | jq -r '.status')
               if [ "$status" = "UP" ]; then
                 echo "健康检查成功! 服务状态: UP"
@@ -197,13 +202,13 @@ jobs:
           
           if [ $SUCCESS -eq 0 ]; then
             echo "健康检查最终失败! 显示容器日志:"
-            docker logs ${{ env.APP_NAME }} --tail 100
+            docker logs "${{ env.APP_NAME }}" --tail 100
             echo "容器资源使用情况:"
-            docker stats ${{ env.APP_NAME }} --no-stream
+            docker stats "${{ env.APP_NAME }}" --no-stream
             exit 1
           fi
           
-          # 10. 清理旧镜像
+          # 11. 清理旧镜像
           echo "清理旧镜像..."
           docker images --filter "reference=${{ env.APP_NAME }}" --format "{{.ID}}" | tail -n +2 | xargs -r docker rmi -f
           echo "清理完成"
