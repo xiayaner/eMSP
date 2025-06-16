@@ -98,7 +98,6 @@ jobs:
           docker run -d \
             --name ${{ env.APP_NAME }} \
             -p ${{ env.APP_PORT }}:8080 \
-            -e SPRING_PROFILES_ACTIVE=prod \
             -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
             -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
             -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
