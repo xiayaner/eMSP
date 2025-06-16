@@ -31,7 +31,7 @@ jobs:
       uses: actions/setup-java@v4
       with:
         java-version: '8'
-        distribution: 'adopt'
+        distribution: 'temurin'  # 使用更稳定的temurin发行版
 
     - name: Build with Maven
       run: mvn clean package -DskipTests
@@ -67,6 +67,19 @@ jobs:
         name: docker-image
         path: .
 
+    - name: Prepare SSH environment
+      run: |
+        mkdir -p ~/.ssh
+        # 正确处理私钥格式（解决换行符问题）
+        echo "${{ secrets.ALIYUN_SSH_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/aliyun_key
+        chmod 600 ~/.ssh/aliyun_key
+        
+        # 添加目标主机到known_hosts（避免首次连接确认）
+        ssh-keyscan -p ${{ env.SSH_PORT }} ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
+        
+        # 测试SSH连接性
+        ssh -T -o ConnectTimeout=5 -i ~/.ssh/aliyun_key -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} echo "SSH连接测试成功!"
+
     - name: Deploy to Aliyun ECS
       uses: appleboy/ssh-action@v1
       with:
@@ -74,6 +87,7 @@ jobs:
         username: ${{ env.SSH_USER }}
         key: ${{ secrets.ALIYUN_SSH_KEY }}
         port: ${{ env.SSH_PORT }}
+        script_timeout: 10m  # 延长超时时间
         script: |
           #!/bin/bash
           set -e  # 任何命令失败则退出
@@ -82,7 +96,7 @@ jobs:
           
           # 1. 上传 Docker 镜像
           echo "上传 Docker 镜像..."
-          scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp
+          # 使用SSH Action内置的文件传输功能
           
           # 2. 加载 Docker 镜像
           echo "加载 Docker 镜像..."
@@ -90,50 +104,70 @@ jobs:
           
           # 3. 停止并删除旧容器（如果存在）
           echo "停止并删除旧容器..."
-          docker stop ${{ env.APP_NAME }} || echo "没有运行中的容器"
-          docker rm ${{ env.APP_NAME }} || echo "没有可删除的容器"
+          if docker ps -a | grep -q ${{ env.APP_NAME }}; then
+            docker stop ${{ env.APP_NAME }} || true
+            docker rm ${{ env.APP_NAME }} || true
+          fi
           
           # 4. 运行新容器（连接到阿里云 RDS）
           echo "启动新容器..."
           docker run -d \
             --name ${{ env.APP_NAME }} \
             -p ${{ env.APP_PORT }}:8080 \
-            -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
+            -e SPRING_DATASOURCE_URL="jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}?useSSL=false&characterEncoding=utf8" \
             -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
-            -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
+            -e SPRING_DATASOURCE_PASSWORD="${{ env.DB_PASSWORD }}" \
             --restart=always \
             ${{ env.APP_NAME }}:$GITHUB_SHA
           
           # 5. 清理临时文件
           echo "清理临时文件..."
-          rm /tmp/${{ env.APP_NAME }}.tar
+          rm -f /tmp/${{ env.APP_NAME }}.tar
           
           # 6. 等待应用启动
           echo "等待应用启动..."
-          sleep 30
+          sleep 10  # 初始等待
           
           # 7. 检查容器状态
           echo "容器状态:"
-          docker ps -a | grep ${{ env.APP_NAME }}
+          docker ps -a | grep ${{ env.APP_NAME }} || { echo "容器未运行!"; exit 1; }
           
-          # 8. 健康检查
+          # 8. 健康检查（带重试机制）
           echo "执行健康检查..."
           HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
           echo "健康检查 URL: $HEALTH_CHECK_URL"
           
-          response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL)
-          if [ "$response" -eq 200 ]; then
-            echo "健康检查成功! 服务状态正常."
-          else
-            echo "健康检查失败! HTTP 状态码: $response"
-            # 显示容器日志以便排查问题
-            docker logs ${{ env.APP_NAME }} --tail 50
-            exit 1
-          fi
+          MAX_RETRY=10
+          for i in $(seq 1 $MAX_RETRY); do
+            response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL || true)
+            if [ "$response" -eq 200 ]; then
+              echo "健康检查成功! 服务状态正常."
+              break
+            else
+              echo "健康检查尝试 $i/$MAX_RETRY 失败. HTTP 状态码: $response"
+              sleep 10
+            fi
+            
+            if [ $i -eq $MAX_RETRY ]; then
+              echo "健康检查最终失败! 显示容器日志:"
+              docker logs ${{ env.APP_NAME }} --tail 50
+              exit 1
+            fi
+          done
           
-          # 9. 发送部署通知
-          echo "===== 部署成功完成! ====="
-          
-          # 10. 清理旧镜像
+          # 9. 清理旧镜像（保留最近2个版本）
           echo "清理旧镜像..."
-          docker image prune -af
+          docker images | grep ${{ env.APP_NAME }} | awk '{print $3}' | tail -n +3 | xargs -r docker rmi -f || true
+          
+          echo "===== 部署成功完成! ====="
+      env:
+        APP_NAME: ${{ env.APP_NAME }}
+        SSH_HOST: ${{ env.SSH_HOST }}
+        SSH_USER: ${{ env.SSH_USER }}
+        SSH_PORT: ${{ env.SSH_PORT }}
+        APP_PORT: ${{ env.APP_PORT }}
+        DB_HOST: ${{ env.DB_HOST }}
+        DB_PORT: ${{ env.DB_PORT }}
+        DB_NAME: ${{ env.DB_NAME }}
+        DB_USER: ${{ env.DB_USER }}
+        DB_PASSWORD: ${{ env.DB_PASSWORD }}
