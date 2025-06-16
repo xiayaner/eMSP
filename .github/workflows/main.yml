@@ -1,4 +1,4 @@
-name: Java CI with Maven
+name: CI/CD to Aliyun ECS
 
 on:
   push:
@@ -6,59 +6,135 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  APP_NAME: emsp-account-card-service
+  SSH_HOST: ${{ secrets.ALIYUN_ECS_IP }}
+  SSH_USER: ${{ secrets.ALIYUN_ECS_USER }}
+  SSH_PORT: ${{ secrets.ALIYUN_ECS_PORT || 22 }}
+  APP_PORT: 8080
+  # 数据库环境变量
+  DB_HOST: ${{ secrets.DB_HOST }}
+  DB_PORT: ${{ secrets.DB_PORT || 3306 }}
+  DB_NAME: ${{ secrets.DB_NAME }}
+  DB_USER: ${{ secrets.DB_USER }}
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
 jobs:
-  build:
+  build-and-test:
     runs-on: ubuntu-latest
 
-    services:
-      mysql:
-        image: mysql:5.7
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: emsp_db
-          MYSQL_USER: testuser      # 添加非root用户
-          MYSQL_PASSWORD: testpass  # 用户密码
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -u root -proot"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up JDK 1.8
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up JDK 8
       uses: actions/setup-java@v3
       with:
         java-version: '8'
-        distribution: 'temurin'
-        cache: maven
-    
-    # 添加MySQL就绪等待
-    - name: Wait for MySQL
-      run: |
-        for i in {1..10}; do
-          if mysqladmin ping -h 127.0.0.1 -u root -proot --silent; then
-            echo "MySQL is ready!"
-            break
-          else
-            echo "Waiting for MySQL ($i/10)"
-            sleep 5
-          fi
-        done
-    
+        distribution: 'adopt'
+
     - name: Build with Maven
       run: mvn clean package -DskipTests
-      
+
     - name: Run tests
       run: mvn test
       env:
-        SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/emsp_db?useSSL=false&allowPublicKeyRetrieval=true
-        SPRING_DATASOURCE_USERNAME: root
-        SPRING_DATASOURCE_PASSWORD: root
-        SPRING_JPA_HIBERNATE_DDL_AUTO: update
-    
+        # 使用阿里云 RDS 进行集成测试
+        SPRING_DATASOURCE_URL: jdbc:mysql://${{ secrets.DB_HOST }}:${{ secrets.DB_PORT || 3306 }}/${{ secrets.DB_NAME }}
+        SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
+        SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
     - name: Build Docker image
-      run: docker build -t emsp-account-card-service:${{ github.sha }} .
+      run: |
+        docker build -t $APP_NAME:$GITHUB_SHA .
+        docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
+        
+    - name: Upload Docker image
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker-image
+        path: ${{ env.APP_NAME }}.tar
+
+  deploy-to-aliyun:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Download Docker image
+      uses: actions/download-artifact@v3
+      with:
+        name: docker-image
+        path: .
+
+    - name: Deploy to Aliyun ECS
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ env.SSH_HOST }}
+        username: ${{ env.SSH_USER }}
+        key: ${{ secrets.ALIYUN_SSH_KEY }}
+        port: ${{ env.SSH_PORT }}
+        script: |
+          #!/bin/bash
+          set -e  # 任何命令失败则退出
+          
+          echo "===== 开始部署到阿里云 ECS ====="
+          
+          # 1. 上传 Docker 镜像
+          echo "上传 Docker 镜像..."
+          scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp
+          
+          # 2. 加载 Docker 镜像
+          echo "加载 Docker 镜像..."
+          docker load -i /tmp/${{ env.APP_NAME }}.tar
+          
+          # 3. 停止并删除旧容器（如果存在）
+          echo "停止并删除旧容器..."
+          docker stop ${{ env.APP_NAME }} || echo "没有运行中的容器"
+          docker rm ${{ env.APP_NAME }} || echo "没有可删除的容器"
+          
+          # 4. 运行新容器（连接到阿里云 RDS）
+          echo "启动新容器..."
+          docker run -d \
+            --name ${{ env.APP_NAME }} \
+            -p ${{ env.APP_PORT }}:8080 \
+            -e SPRING_PROFILES_ACTIVE=prod \
+            -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
+            -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
+            -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
+            --restart=always \
+            ${{ env.APP_NAME }}:$GITHUB_SHA
+          
+          # 5. 清理临时文件
+          echo "清理临时文件..."
+          rm /tmp/${{ env.APP_NAME }}.tar
+          
+          # 6. 等待应用启动
+          echo "等待应用启动..."
+          sleep 30
+          
+          # 7. 检查容器状态
+          echo "容器状态:"
+          docker ps -a | grep ${{ env.APP_NAME }}
+          
+          # 8. 健康检查
+          echo "执行健康检查..."
+          HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
+          echo "健康检查 URL: $HEALTH_CHECK_URL"
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL)
+          if [ "$response" -eq 200 ]; then
+            echo "健康检查成功! 服务状态正常."
+          else
+            echo "健康检查失败! HTTP 状态码: $response"
+            # 显示容器日志以便排查问题
+            docker logs ${{ env.APP_NAME }} --tail 50
+            exit 1
+          fi
+          
+          # 9. 发送部署通知
+          echo "===== 部署成功完成! ====="
+          
+          # 10. 清理旧镜像
+          echo "清理旧镜像..."
+          docker image prune -af
