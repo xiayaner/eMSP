@@ -72,7 +72,7 @@ jobs:
     - name: Setup SSH environment
       run: |
         mkdir -p ~/.ssh
-        echo "${{ secrets.ALIYUN_ECS_SSH_KEY }}" > ~/.ssh/aliyun_key
+        echo "${{ secrets.ALIYUN_SSH_KEY }}" > ~/.ssh/aliyun_key
         chmod 600 ~/.ssh/aliyun_key
         ssh-keyscan -p ${{ env.SSH_PORT }} ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
 
