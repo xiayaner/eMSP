@@ -7,12 +7,17 @@ on:
     branches: [ main ]
 
 env:
-  DOCKER_IMAGE: emsp/account-card-service
-  DOCKER_TAG: ${{ github.sha }}
+  APP_NAME: emsp-account-card-service
   SSH_HOST: ${{ secrets.ALIYUN_ECS_IP }}
   SSH_USER: ${{ secrets.ALIYUN_ECS_USER }}
   SSH_PORT: ${{ secrets.ALIYUN_ECS_PORT || 22 }}
   APP_PORT: 8080
+  # 数据库环境变量
+  DB_HOST: ${{ secrets.DB_HOST }}
+  DB_PORT: ${{ secrets.DB_PORT || 3306 }}
+  DB_NAME: ${{ secrets.DB_NAME }}
+  DB_USER: ${{ secrets.DB_USER }}
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
 jobs:
   build-and-test:
@@ -34,19 +39,22 @@ jobs:
     - name: Run tests
       run: mvn test
       env:
-        DB_HOST: localhost
-        DB_USER: root
-        DB_PASSWORD: password
-        DB_NAME: emsp_db
+        # 使用阿里云 RDS 进行集成测试
+        SPRING_DATASOURCE_URL: jdbc:mysql://${{ secrets.DB_HOST }}:${{ secrets.DB_PORT || 3306 }}/${{ secrets.DB_NAME }}
+        SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
+        SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
     - name: Build Docker image
-      run: docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
-
-    - name: Push to Docker Hub
-      if: github.ref == 'refs/heads/main'
       run: |
-        docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-        docker push $DOCKER_IMAGE:$DOCKER_TAG
+        docker build -t $APP_NAME:$GITHUB_SHA .
+        docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
+        
+    - name: Upload Docker image
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: ${{ env.APP_NAME }}.tar
+        retention-days: 1
 
   deploy-to-aliyun:
     needs: build-and-test
@@ -54,42 +62,82 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-    - name: Deploy to Aliyun ECS
-      uses: appleboy/ssh-action@v0.1.10
+    - name: Download Docker image
+      uses: actions/download-artifact@v4
       with:
-        host: ${{ env.SSH_HOST }}
-        username: ${{ env.SSH_USER }}
-        key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
-        port: ${{ env.SSH_PORT }}
-        script: |
-          #!/bin/bash
-          # 1. 拉取最新镜像
-          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-          docker pull $DOCKER_IMAGE:$DOCKER_TAG
-          
-          # 2. 停止并删除旧容器
-          docker stop emsp-service || true
-          docker rm emsp-service || true
-          
-          # 3. 运行新容器
-          docker run -d \
-            --name emsp-service \
-            -p $APP_PORT:8080 \
-            -e DB_HOST=${{ secrets.DB_HOST }} \
-            -e DB_PORT=${{ secrets.DB_PORT }} \
-            -e DB_NAME=${{ secrets.DB_NAME }} \
-            -e DB_USER=${{ secrets.DB_USER }} \
-            -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
-            --restart=always \
-            $DOCKER_IMAGE:$DOCKER_TAG
-          
-          # 4. 清理旧镜像
-          docker image prune -af
-          
-          # 5. 检查容器状态
-          sleep 10
-          docker ps -a
-          curl -I http://localhost:$APP_PORT/actuator/health
-          
-          # 6. 发送部署通知
-          echo "Deployment completed successfully!"
+        name: docker-image
+        path: .
+
+    # 使用官方 SSH 连接方式而不是第三方 Action
+    - name: Setup SSH environment
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.ALIYUN_SSH_KEY }}" > ~/.ssh/aliyun_key
+        chmod 600 ~/.ssh/aliyun_key
+        ssh-keyscan -p ${{ env.SSH_PORT }} ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Upload Docker image to ECS
+      run: |
+        scp -o StrictHostKeyChecking=no -P ${{ env.SSH_PORT }} ${{ env.APP_NAME }}.tar ${{ env.SSH_USER }}@${{ env.SSH_HOST }}:/tmp
+
+    - name: Deploy on Aliyun ECS
+      run: |
+        ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} -i ~/.ssh/aliyun_key ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << 'EOF'
+        #!/bin/bash
+        set -e  # 任何命令失败则退出
+        
+        echo "===== 开始部署到阿里云 ECS ====="
+        
+        # 1. 加载 Docker 镜像
+        echo "加载 Docker 镜像..."
+        docker load -i /tmp/${{ env.APP_NAME }}.tar
+        
+        # 2. 停止并删除旧容器（如果存在）
+        echo "停止并删除旧容器..."
+        docker stop ${{ env.APP_NAME }} || echo "没有运行中的容器"
+        docker rm ${{ env.APP_NAME }} || echo "没有可删除的容器"
+        
+        # 3. 运行新容器（连接到阿里云 RDS）
+        echo "启动新容器..."
+        docker run -d \
+          --name ${{ env.APP_NAME }} \
+          -p ${{ env.APP_PORT }}:8080 \
+          -e SPRING_DATASOURCE_URL=jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }} \
+          -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
+          -e SPRING_DATASOURCE_PASSWORD=${{ env.DB_PASSWORD }} \
+          --restart=always \
+          ${{ env.APP_NAME }}:$GITHUB_SHA
+        
+        # 4. 清理临时文件
+        echo "清理临时文件..."
+        rm /tmp/${{ env.APP_NAME }}.tar
+        
+        # 5. 等待应用启动
+        echo "等待应用启动..."
+        sleep 30
+        
+        # 6. 检查容器状态
+        echo "容器状态:"
+        docker ps -a | grep ${{ env.APP_NAME }}
+        
+        # 7. 健康检查
+        echo "执行健康检查..."
+        HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
+        echo "健康检查 URL: $HEALTH_CHECK_URL"
+        
+        response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL)
+        if [ "$response" -eq 200 ]; then
+          echo "健康检查成功! 服务状态正常."
+        else
+          echo "健康检查失败! HTTP 状态码: $response"
+          # 显示容器日志以便排查问题
+          docker logs ${{ env.APP_NAME }} --tail 50
+          exit 1
+        fi
+        
+        echo "===== 部署成功完成! ====="
+        
+        # 8. 清理旧镜像
+        echo "清理旧镜像..."
+        docker image prune -af
+        EOF
