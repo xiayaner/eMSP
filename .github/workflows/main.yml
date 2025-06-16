@@ -25,10 +25,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up JDK 8
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v4
       with:
         java-version: '8'
         distribution: 'adopt'
@@ -50,7 +50,7 @@ jobs:
         docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
         
     - name: Upload Docker image
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: docker-image
         path: ${{ env.APP_NAME }}.tar
@@ -62,13 +62,13 @@ jobs:
 
     steps:
     - name: Download Docker image
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: docker-image
         path: .
 
     - name: Deploy to Aliyun ECS
-      uses: appleboy/ssh-action@v0.1.10
+      uses: appleboy/ssh-action@v1
       with:
         host: ${{ env.SSH_HOST }}
         username: ${{ env.SSH_USER }}
