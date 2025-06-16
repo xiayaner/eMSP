@@ -1,4 +1,4 @@
-name: CI/CD to Aliyun ECS
+name: CI/CD to Aliyun ECS with Password Auth
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
       uses: actions/setup-java@v4
       with:
         java-version: '8'
-        distribution: 'temurin'  # 使用更稳定的temurin发行版
+        distribution: 'temurin'
 
     - name: Build with Maven
       run: mvn clean package -DskipTests
@@ -39,7 +39,6 @@ jobs:
     - name: Run tests
       run: mvn test
       env:
-        # 使用阿里云 RDS 进行集成测试
         SPRING_DATASOURCE_URL: jdbc:mysql://${{ secrets.DB_HOST }}:${{ secrets.DB_PORT || 3306 }}/${{ secrets.DB_NAME }}
         SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
         SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
@@ -67,30 +66,17 @@ jobs:
         name: docker-image
         path: .
 
-    - name: Prepare SSH environment
-      run: |
-        mkdir -p ~/.ssh
-        # 正确处理私钥格式（解决换行符问题）
-        echo "${{ secrets.ALIYUN_SSH_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/aliyun_key
-        chmod 600 ~/.ssh/aliyun_key
-        
-        # 添加目标主机到known_hosts（避免首次连接确认）
-        ssh-keyscan -p ${{ env.SSH_PORT }} ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
-        
-        # 测试SSH连接性
-        ssh -T -o ConnectTimeout=5 -i ~/.ssh/aliyun_key -p ${{ env.SSH_PORT }} ${{ env.SSH_USER }}@${{ env.SSH_HOST }} echo "SSH连接测试成功!"
-
-    - name: Deploy to Aliyun ECS
+    - name: Deploy to Aliyun ECS using Password
       uses: appleboy/ssh-action@v1
       with:
         host: ${{ env.SSH_HOST }}
         username: ${{ env.SSH_USER }}
-        key: ${{ secrets.ALIYUN_SSH_KEY }}
+        password: ${{ secrets.ALIYUN_ECS_PASSWORD }}  # 使用密码认证
         port: ${{ env.SSH_PORT }}
-        script_timeout: 10m  # 延长超时时间
+        script_timeout: 10m
         script: |
           #!/bin/bash
-          set -e  # 任何命令失败则退出
+          set -e
           
           echo "===== 开始部署到阿里云 ECS ====="
           
@@ -109,7 +95,7 @@ jobs:
             docker rm ${{ env.APP_NAME }} || true
           fi
           
-          # 4. 运行新容器（连接到阿里云 RDS）
+          # 4. 运行新容器
           echo "启动新容器..."
           docker run -d \
             --name ${{ env.APP_NAME }} \
@@ -126,17 +112,11 @@ jobs:
           
           # 6. 等待应用启动
           echo "等待应用启动..."
-          sleep 10  # 初始等待
+          sleep 10
           
-          # 7. 检查容器状态
-          echo "容器状态:"
-          docker ps -a | grep ${{ env.APP_NAME }} || { echo "容器未运行!"; exit 1; }
-          
-          # 8. 健康检查（带重试机制）
+          # 7. 健康检查（带重试机制）
           echo "执行健康检查..."
           HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
-          echo "健康检查 URL: $HEALTH_CHECK_URL"
-          
           MAX_RETRY=10
           for i in $(seq 1 $MAX_RETRY); do
             response=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_CHECK_URL || true)
@@ -155,19 +135,8 @@ jobs:
             fi
           done
           
-          # 9. 清理旧镜像（保留最近2个版本）
+          # 8. 清理旧镜像
           echo "清理旧镜像..."
-          docker images | grep ${{ env.APP_NAME }} | awk '{print $3}' | tail -n +3 | xargs -r docker rmi -f || true
+          docker image prune -af
           
           echo "===== 部署成功完成! ====="
-      env:
-        APP_NAME: ${{ env.APP_NAME }}
-        SSH_HOST: ${{ env.SSH_HOST }}
-        SSH_USER: ${{ env.SSH_USER }}
-        SSH_PORT: ${{ env.SSH_PORT }}
-        APP_PORT: ${{ env.APP_PORT }}
-        DB_HOST: ${{ env.DB_HOST }}
-        DB_PORT: ${{ env.DB_PORT }}
-        DB_NAME: ${{ env.DB_NAME }}
-        DB_USER: ${{ env.DB_USER }}
-        DB_PASSWORD: ${{ env.DB_PASSWORD }}
