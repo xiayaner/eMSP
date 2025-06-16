@@ -1,200 +1,132 @@
-name: CI/CD to Aliyun ECS
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-env:
-  APP_NAME: emsp-account-card-service
-  SSH_HOST: ${{ secrets.ALIYUN_ECS_IP }}
-  SSH_USER: ${{ secrets.ALIYUN_ECS_USER }}
-  SSH_PORT: ${{ secrets.ALIYUN_ECS_PORT || 22 }}
-  APP_PORT: 8080
-  # 数据库环境变量
-  DB_HOST: ${{ secrets.DB_HOST }}
-  DB_PORT: ${{ secrets.DB_PORT || 3306 }}
-  DB_NAME: ${{ secrets.DB_NAME }}
-  DB_USER: ${{ secrets.DB_USER }}
-  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+    branches:
+      - main
 
 jobs:
-  build-and-test:
+  build-and-push:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up JDK 8
-      uses: actions/setup-java@v4
-      with:
-        java-version: '8'
-        distribution: 'temurin'
-
-    - name: Build with Maven
-      run: mvn clean package -DskipTests
-
-    - name: Run tests
-      run: mvn test
-      env:
-        SPRING_DATASOURCE_URL: jdbc:mysql://${{ secrets.DB_HOST }}:${{ secrets.DB_PORT || 3306 }}/${{ secrets.DB_NAME }}
-        SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
-        SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
-
-    - name: Build Docker image
-      run: |
-        docker build -t $APP_NAME:$GITHUB_SHA .
-        docker save -o $APP_NAME.tar $APP_NAME:$GITHUB_SHA
-        echo "Docker镜像大小: $(du -h $APP_NAME.tar)"
+      - name: Checkout code
+        uses: actions/checkout@v4
         
-    - name: Upload Docker image
-      uses: actions/upload-artifact@v4
-      with:
-        name: docker-image
-        path: ${{ env.APP_NAME }}.tar
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.APP_NAME }}:latest .
+          docker save ${{ env.APP_NAME }}:latest > ${{ env.APP_NAME }}.tar
+          
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: ${{ env.APP_NAME }}.tar
+          retention-days: 1
 
-  deploy-to-aliyun:
-    needs: build-and-test
+  deploy:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-
+    needs: build-and-push
+    env:
+      APP_NAME: emsp-account-card-service
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      APP_PORT: 8080
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+    
     steps:
-    - name: Download Docker image
-      uses: actions/download-artifact@v4
-      with:
-        name: docker-image
-        path: .
-        
-    - name: Verify Docker image exists
-      run: |
-        if [ ! -f "${{ env.APP_NAME }}.tar" ]; then
-          echo "错误：Docker 镜像文件不存在!"
-          echo "当前目录内容:"
-          ls -lah
-          exit 1
-        else
-          echo "Docker镜像文件存在，大小: $(du -h ${{ env.APP_NAME }}.tar)"
-        fi
-
-    - name: Deploy to Aliyun ECS using Password
-      uses: appleboy/ssh-action@v1
-      with:
-        host: ${{ env.SSH_HOST }}
-        username: ${{ env.SSH_USER }}
-        password: ${{ secrets.ALIYUN_ECS_PASSWORD }}
-        port: ${{ env.SSH_PORT }}
-        script_timeout: 30m  # 延长超时时间
-        # 显式指定SCP文件传输
-        scp: |
-          ./${{ env.APP_NAME }}.tar
-        scp_destination: /tmp
-        script: |
-          #!/bin/bash
-          set -e -o pipefail  # 增强错误检测
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
           
-          echo "===== 开始部署到阿里云 ECS ====="
-          echo "当前用户: $(whoami)"
-          echo "当前目录: $(pwd)"
-          echo "主机信息: $(uname -a)"
-          
-          # 1. 验证文件存在
-          FILE_PATH="/tmp/${{ env.APP_NAME }}.tar"
-          echo "验证 Docker 镜像文件: $FILE_PATH"
-          
-          if [ ! -f "$FILE_PATH" ]; then
-            echo "错误: 文件 $FILE_PATH 不存在!"
-            echo "当前 /tmp 目录内容:"
-            ls -lh /tmp
-            echo "磁盘空间信息:"
-            df -h
+      - name: Verify Docker image exists
+        run: |
+          if [ ! -f "$APP_NAME.tar" ]; then
+            echo "错误：Docker 镜像文件不存在!"
+            echo "当前目录内容:"
+            ls -lah
             exit 1
           else
-            echo "文件存在，大小: $(du -h $FILE_PATH)"
-            echo "文件类型: $(file $FILE_PATH)"
+            echo "Docker镜像文件存在，大小: $(du -h $APP_NAME.tar)"
           fi
           
-          # 2. 加载 Docker 镜像
-          echo "加载 Docker 镜像..."
-          docker load -i $FILE_PATH
+      - name: Transfer Docker image to server
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER }}
+          port: ${{ env.SSH_PORT }}
+          key: ${{ env.SSH_KEY }}
+          source: "${{ env.APP_NAME }}.tar"
+          target: "/tmp"
           
-          # 3. 检查镜像是否加载成功
-          echo "已加载的 Docker 镜像:"
-          docker images | grep ${{ env.APP_NAME }}
-          
-          # 4. 停止并删除旧容器（如果存在）
-          echo "停止并删除旧容器..."
-          if docker ps -a | grep -q ${{ env.APP_NAME }}; then
-            docker stop ${{ env.APP_NAME }} || true
-            docker rm ${{ env.APP_NAME }} || true
-          else
-            echo "没有找到正在运行的旧容器"
-          fi
-          
-          # 5. 运行新容器
-          echo "启动新容器..."
-          docker run -d \
-            --name ${{ env.APP_NAME }} \
-            -p ${{ env.APP_PORT }}:8080 \
-            -e SPRING_DATASOURCE_URL="jdbc:mysql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}?useSSL=false&characterEncoding=utf8" \
-            -e SPRING_DATASOURCE_USERNAME=${{ env.DB_USER }} \
-            -e SPRING_DATASOURCE_PASSWORD="${{ env.DB_PASSWORD }}" \
-            --restart=always \
-            ${{ env.APP_NAME }}:$GITHUB_SHA
-          
-          # 6. 清理临时文件
-          echo "清理临时文件..."
-          rm -f $FILE_PATH
-          echo "临时文件已清理"
-          
-          # 7. 等待应用启动
-          echo "等待应用启动..."
-          sleep 15  # 适当延长初始等待时间
-          
-          # 8. 检查容器状态
-          echo "容器状态:"
-          docker ps -a | grep ${{ env.APP_NAME }} || { echo "容器未运行!"; exit 1; }
-          
-          # 9. 健康检查（带重试机制）
-          echo "执行健康检查..."
-          HEALTH_CHECK_URL="http://localhost:${{ env.APP_PORT }}/actuator/health"
-          echo "健康检查 URL: $HEALTH_CHECK_URL"
-          
-          MAX_RETRY=12
-          SUCCESS=0
-          
-          for i in $(seq 1 $MAX_RETRY); do
-            echo "健康检查尝试 $i/$MAX_RETRY..."
-            if response=$(curl -s -f $HEALTH_CHECK_URL); then
-              status=$(echo "$response" | jq -r '.status')
-              if [ "$status" = "UP" ]; then
-                echo "健康检查成功! 服务状态: UP"
-                SUCCESS=1
-                break
-              else
-                echo "服务状态: $status"
-              fi
+      - name: Deploy to ECS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ env.SSH_KEY }}
+          port: ${{ env.SSH_PORT }}
+          script_timeout: 600  # 增加超时时间
+          script: |
+            set -e  # 任何命令失败则退出
+            
+            echo "===== 开始部署到阿里云 ECS ====="
+            echo "当前用户: $(whoami)"
+            echo "当前目录: $(pwd)"
+            echo "主机信息: $(uname -a)"
+            
+            # 验证传输的镜像文件
+            IMAGE_PATH="/tmp/$APP_NAME.tar"
+            echo "验证 Docker 镜像文件: $IMAGE_PATH"
+            
+            if [ ! -f "$IMAGE_PATH" ]; then
+              echo "错误: 文件 $IMAGE_PATH 不存在!"
+              echo "当前 /tmp 目录内容:"
+              ls -lah /tmp
+              echo "磁盘空间信息:"
+              df -h
+              exit 1
             else
-              echo "HTTP请求失败，状态码: $?"
+              echo "Docker镜像文件存在，大小: $(du -h $IMAGE_PATH)"
             fi
             
-            echo "等待10秒后重试..."
-            sleep 10
-          done
-          
-          if [ $SUCCESS -eq 0 ]; then
-            echo "健康检查最终失败! 显示容器日志:"
-            docker logs ${{ env.APP_NAME }} --tail 100
-            echo "容器资源使用情况:"
-            docker stats ${{ env.APP_NAME }} --no-stream
-            exit 1
-          fi
-          
-          # 10. 清理旧镜像
-          echo "清理旧镜像..."
-          docker images --filter "reference=${{ env.APP_NAME }}" --format "{{.ID}}" | tail -n +2 | xargs -r docker rmi -f
-          echo "清理完成"
-          
-          echo "===== 部署成功完成! ====="
-          date
+            # 停止并删除旧容器
+            if docker ps -a | grep -q "$APP_NAME"; then
+              echo "停止并删除旧容器..."
+              docker stop $APP_NAME || true
+              docker rm $APP_NAME || true
+            fi
+            
+            # 加载新镜像
+            echo "加载 Docker 镜像..."
+            docker load -i $IMAGE_PATH
+            
+            # 运行新容器
+            echo "启动新容器..."
+            docker run -d \
+              --name $APP_NAME \
+              --restart always \
+              -p $APP_PORT:8080 \
+              -e DB_HOST=$DB_HOST \
+              -e DB_PORT=$DB_PORT \
+              -e DB_NAME=$DB_NAME \
+              -e DB_USER=$DB_USER \
+              -e DB_PASSWORD=$DB_PASSWORD \
+              $APP_NAME:latest
+              
+            # 清理临时文件
+            echo "清理临时文件..."
+            rm -f $IMAGE_PATH
+            
+            echo "===== 部署成功完成 ====="
+            echo "容器状态:"
+            docker ps -f "name=$APP_NAME"
