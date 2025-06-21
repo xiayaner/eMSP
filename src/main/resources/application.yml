@@ -35,7 +35,6 @@ pagehelper:
 
 springdoc:
   swagger-ui:
-    path: /swagger-ui/index.html
     enabled: true
 
 logging:
