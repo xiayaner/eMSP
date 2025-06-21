@@ -33,6 +33,11 @@ pagehelper:
   reasonable: true
   support-methods-arguments: true
 
+springdoc:
+  swagger-ui:
+    path: /swagger-ui/index.html
+    enabled: true
+
 logging:
   level:
     root: INFO

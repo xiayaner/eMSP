@@ -123,6 +123,17 @@
             <version>1.17.3</version>
             <scope>test</scope>
         </dependency>
+        <!-- 适用于 Java 8 的 Swagger 依赖 -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-ui</artifactId>
+            <version>1.6.15</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-data-rest</artifactId>
+            <version>1.6.15</version>
+        </dependency>
     </dependencies>
 
     <build>
