@@ -1,5 +1,7 @@
 package com.emsp.application;
 
+import com.emsp.application.query.QueryCoordinator;
+import com.emsp.domain.events.CardsQueryResponseEvent;
 import com.emsp.infrastructure.persistence.converter.AccountConverter;
 import com.emsp.application.dto.AccountDTO;
 import com.emsp.application.dto.AccountWithCardsDTO;
@@ -29,6 +31,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -52,6 +55,9 @@ class AccountAppServiceTest {
 
     @Mock
     private DomainEventPublisher eventPublisher;
+
+    @Mock
+    private QueryCoordinator queryCoordinator;
     
     @InjectMocks
     private AccountAppService accountAppService;
@@ -115,7 +121,9 @@ class AccountAppServiceTest {
 
         when(accountService.findByLastUpdatedAfter(any(Instant.class), anyInt(), anyInt()))
             .thenReturn(Collections.singletonList(testAccount));
-        when(cardService.findCardsByAccountIds(any())).thenReturn(testCardsMap);
+        // 模拟QueryCoordinator返回预设的卡片数据
+        CompletableFuture<Map<Long, List<Card>>> cardsFuture = CompletableFuture.completedFuture(testCardsMap);
+        when(queryCoordinator.requestCards(anyList())).thenReturn(cardsFuture);
         
         // 执行
         Page<AccountWithCardsDTO> result = accountAppService.findAccountsWithCardsUpdatedAfter(testTime, 0, 10);

@@ -1,5 +1,6 @@
 package com.emsp.infrastructure.persistence.mapper;
 
+import com.emsp.domain.model.CardStatus;
 import com.emsp.infrastructure.persistence.po.CardPO;
 import org.apache.ibatis.annotations.*;
 
@@ -51,4 +52,10 @@ public interface CardMapper {
             "</script>"
     })
     List<CardPO> selectByAccountIds(@Param("accountIds") List<Long> accountIds);
+
+    @Select("SELECT * FROM cards WHERE account_id = #{accountId} AND status = #{status}")
+    List<CardPO> selectByAccountIdAndStatus(
+            @Param("accountId") Long accountId,
+            @Param("status") CardStatus status
+    );
 }

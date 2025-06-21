@@ -1,9 +1,6 @@
 package com.emsp.domain.model;
 
 import com.emsp.domain.common.DomainEvent;
-import com.emsp.domain.events.CardActivatedEvent;
-import com.emsp.domain.events.CardAssignedEvent;
-import com.emsp.domain.events.CardDeactivatedEvent;
 import com.emsp.domain.model.valueobjects.ContractId;
 import com.emsp.domain.model.valueobjects.RFID;
 import lombok.Getter;
@@ -90,9 +87,6 @@ public class Card {
         this.accountId = accountId;
         this.status = CardStatus.ASSIGNED;
         this.lastUpdated = Instant.now();
-
-        // 发布领域事件
-        domainEvents.add(new CardAssignedEvent(this));
     }
 
     /**
@@ -106,7 +100,6 @@ public class Card {
         }
         this.status = CardStatus.ACTIVATED;
         this.lastUpdated = Instant.now();
-        domainEvents.add(new CardActivatedEvent(this));
     }
 
     /**
@@ -120,7 +113,6 @@ public class Card {
         }
         this.status = CardStatus.DEACTIVATED;
         this.lastUpdated = Instant.now();
-        domainEvents.add(new CardDeactivatedEvent(this));
     }
 
     // ================== 领域事件管理 ================== //

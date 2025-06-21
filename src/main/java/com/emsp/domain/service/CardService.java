@@ -16,4 +16,5 @@ public interface CardService {
     List<Card> findCardsByLastUpdatedAfter(Instant lastUpdated, int page, int size);
     Card getCardById(String cardId);
     Map<Long, List<Card>> findCardsByAccountIds(List<Long> accountIds);
+    void deactivateCardsForAccount(Long accountId);
 }

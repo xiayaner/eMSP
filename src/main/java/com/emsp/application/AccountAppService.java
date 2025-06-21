@@ -5,6 +5,7 @@ import com.emsp.application.dto.AccountWithCardsDTO;
 import com.emsp.application.dto.CardDTO;
 import com.emsp.application.dto.CreateAccountRequest;
 import com.emsp.application.dto.UpdateAccountStatusRequest;
+import com.emsp.application.query.QueryCoordinator;
 import com.emsp.domain.model.Account;
 import com.emsp.domain.model.Card;
 import com.emsp.domain.service.AccountService;
@@ -23,6 +24,8 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 @Service
@@ -35,6 +38,7 @@ public class AccountAppService {
     private final CardConverter cardConverter;
     private final DomainEventPublisher eventPublisher;
     private final CardService cardService;
+    private final QueryCoordinator queryCoordinator;
 
     /**
      * 创建新账户
@@ -88,16 +92,28 @@ public class AccountAppService {
                 .map(Account::getId)
                 .collect(Collectors.toList());
 
-        // 3. 批量查询关联的卡片（按账户分组）
-        Map<Long, List<Card>> cardsByAccountId = cardService.findCardsByAccountIds(accountIds);
+        // 3. 通过事件驱动查询卡片
+        CompletableFuture<Map<Long, List<Card>>> cardsFuture =
+                queryCoordinator.requestCards(accountIds);
 
-        // 4. 转换为DTO
-        List<AccountWithCardsDTO> dtos = accounts.stream()
-                .map(account -> convertToAccountWithCardsDTO(account, cardsByAccountId.get(account.getId())))
-                .collect(Collectors.toList());
+        try {
+            // 等待卡片查询结果（实际项目应设置超时）
+            Map<Long, List<Card>> cardsByAccountId = cardsFuture.get();
 
-        // 5. 创建分页对象（暂时不查询总记录数，避免性能问题）
-        return new PageImpl<>(dtos, PageRequest.of(page, size), dtos.size());
+            // 4. 转换为DTO
+            List<AccountWithCardsDTO> dtos = accounts.stream()
+                    .map(account -> convertToAccountWithCardsDTO(
+                            account,
+                            cardsByAccountId.get(account.getId())
+                    ))
+                    .collect(Collectors.toList());
+
+            return new PageImpl<>(dtos, PageRequest.of(page, size), dtos.size());
+
+        } catch (InterruptedException | ExecutionException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Failed to fetch cards data", e);
+        }
     }
 
     private AccountWithCardsDTO convertToAccountWithCardsDTO(Account account, List<Card> cards) {

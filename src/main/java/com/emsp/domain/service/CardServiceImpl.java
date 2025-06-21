@@ -102,4 +102,21 @@ public class CardServiceImpl implements CardService {
                 .filter(card -> card.getAccountId() != null)
                 .collect(Collectors.groupingBy(Card::getAccountId));
     }
+
+    @Override
+    public void deactivateCardsForAccount(Long accountId) {
+        // 1. 查询账户下所有激活状态的卡片
+        List<Card> activeCards = cardRepository.findByAccountIdAndStatus(accountId, CardStatus.ACTIVATED);
+
+        // 2. 停用每张卡片
+        activeCards.forEach(card -> {
+            try {
+                card.deactivate();
+                cardRepository.save(card);
+                System.out.println("Deactivated card: " + card.getId() + " for account: " + accountId);
+            } catch (IllegalStateException e) {
+                System.err.println("Failed to deactivate card " + card.getId() + ": " + e.getMessage());
+            }
+        });
+    }
 }

@@ -1,5 +1,6 @@
 package com.emsp.domain.repository;
 
+import com.emsp.infrastructure.event.DomainEventPublisher;
 import com.emsp.infrastructure.persistence.converter.AccountConverter;
 import com.emsp.domain.model.Account;
 import com.emsp.domain.model.AccountStatus;
@@ -32,6 +33,9 @@ class AccountRepositoryImplTest {
     
     @Mock
     private AccountConverter accountConverter;
+
+    @Mock
+    private DomainEventPublisher domainEventPublisher;
     
     @InjectMocks
     private AccountRepositoryImpl accountRepository;

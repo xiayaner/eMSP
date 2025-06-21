@@ -1,9 +1,7 @@
 package com.emsp.domain.model;
 
 import com.emsp.domain.common.DomainEvent;
-import com.emsp.domain.events.AccountActivatedEvent;
 import com.emsp.domain.events.AccountDeactivatedEvent;
-import com.emsp.domain.events.CardAssignedEvent;
 import lombok.Getter;
 
 import java.time.Instant;
@@ -64,7 +62,6 @@ public class Account {
         }
         this.status = AccountStatus.ACTIVATED;
         this.lastUpdated = Instant.now();
-        domainEvents.add(new AccountActivatedEvent(this));
     }
 
     /**
@@ -102,9 +99,6 @@ public class Account {
         cards.add(card);
         card.assignToAccount(this.id);
         this.lastUpdated = Instant.now();
-
-        // 发布领域事件
-        domainEvents.add(new CardAssignedEvent(card));
     }
 
     // ================== 领域事件管理 ================== //

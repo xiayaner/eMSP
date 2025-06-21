@@ -1,5 +1,6 @@
 package com.emsp.infrastructure.persistence.repository;
 
+import com.emsp.infrastructure.event.DomainEventPublisher;
 import com.emsp.infrastructure.persistence.converter.AccountConverter;
 import com.emsp.domain.model.Account;
 import com.emsp.domain.repository.AccountRepository;
@@ -19,6 +20,8 @@ public class AccountRepositoryImpl implements AccountRepository {
 
     private final AccountMapper accountMapper;
     private final AccountConverter accountConverter;
+    private final DomainEventPublisher domainEventPublisher; // 注入事件发布器
+
 
     @Override
     public Account save(Account account) {
@@ -29,6 +32,8 @@ public class AccountRepositoryImpl implements AccountRepository {
         } else {
             accountMapper.update(po);
         }
+        // 关键：保存后发布所有领域事件
+        publishDomainEvents(account);
         return account;
     }
 
@@ -49,5 +54,10 @@ public class AccountRepositoryImpl implements AccountRepository {
         return accountMapper.selectByLastUpdatedAfter(lastUpdated, page, size).stream()
                 .map(accountConverter::toDomain)
                 .collect(Collectors.toList());
+    }
+
+    private void publishDomainEvents(Account account) {
+        account.getDomainEvents().forEach(domainEventPublisher::publish);
+        account.clearDomainEvents();
     }
 }

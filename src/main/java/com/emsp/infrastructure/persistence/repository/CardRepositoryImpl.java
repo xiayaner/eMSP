@@ -1,6 +1,7 @@
 package com.emsp.infrastructure.persistence.repository;
 
 import com.emsp.domain.model.Card;
+import com.emsp.domain.model.CardStatus;
 import com.emsp.domain.model.valueobjects.RFID;
 import com.emsp.domain.repository.CardRepository;
 import com.emsp.infrastructure.persistence.converter.CardConverter;
@@ -68,6 +69,17 @@ public class CardRepositoryImpl implements CardRepository {
 
         // 查询PO
         List<CardPO> pos = cardMapper.selectByAccountIds(accountIds);
+
+        // 转换为领域对象
+        return pos.stream()
+                .map(cardConverter::toDomain)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<Card> findByAccountIdAndStatus(Long accountId, CardStatus status) {
+        // 查询PO
+        List<CardPO> pos = cardMapper.selectByAccountIdAndStatus(accountId, status);
 
         // 转换为领域对象
         return pos.stream()
